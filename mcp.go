@@ -25,28 +25,27 @@ func init() {
 	RegisterTool(
 		ContainerCreateTool,
 		ContainerListTool,
+		ContainerForkTool,
 		ContainerHistoryTool,
 		ContainerRevertTool,
-		ContainerForkTool,
-
 		ContainerRunCmdTool,
-
 		ContainerUploadTool,
 		ContainerDownloadTool,
 		ContainerDiffTool,
-
 		ContainerFileReadTool,
 		ContainerFileListTool,
 		ContainerFileWriteTool,
 		ContainerFileDeleteTool,
 		ContainerRevisionDiffTool,
+		GitInfoTool,
+		ContainerSyncTool,
 	)
 }
 
 var ContainerCreateTool = &Tool{
 	Definition: mcp.NewTool("container_create",
-		mcp.WithDescription(`Create a new container. The sandbox only contains the base image specified, anything else required will need to be installed by hand.
-		You won't be able to access your local filesystem directly. If you need to manipulate the filesystem, first you will have to call "container_upload"`),
+		mcp.WithDescription(`Create a new git-aware container. Automatically detects git repositories and includes git metadata. 
+		Optionally includes repository content in the container.`),
 		mcp.WithString("name",
 			mcp.Description("The name of the container."),
 			mcp.Required(),
@@ -60,8 +59,11 @@ var ContainerCreateTool = &Tool{
 		),
 		mcp.WithString("workdir",
 			mcp.Description(`Working directory for the container. All commands will be executed in this directory and all file operations will be relative to this. Defaults to "/workdir"`),
-			mcp.Required(),
 		),
+		mcp.WithBoolean("include_git_content",
+			mcp.Description("Whether to include the git repository content in the container. Defaults to true if in a git repository."),
+		),
+
 	),
 	Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		name, err := request.RequireString("name")
@@ -72,14 +74,47 @@ var ContainerCreateTool = &Tool{
 		if err != nil {
 			return nil, err
 		}
+		
+		gitState, err := GetGitState()
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("failed to get git state", err), nil
+		}
+		
 		workdir := request.GetString("workdir", "/workdir")
-		sandbox, err := CreateContainer(name, request.GetString("explanation", ""), image, workdir)
+		if gitState.IsRepository {
+			gitRelPath, _ := GetGitWorkdir()
+			if gitRelPath != "" && workdir == "/workdir" {
+				workdir = fmt.Sprintf("/git-repo/%s", gitRelPath)
+			} else if workdir == "/workdir" {
+				workdir = "/git-repo"
+			}
+		}
+		
+		includeGitContent := request.GetBool("include_git_content", gitState.IsRepository)
+		
+		sandbox, err := CreateContainer(name, request.GetString("explanation", ""), image, workdir, includeGitContent)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to create container", err), nil
 		}
-		return mcp.NewToolResultText(fmt.Sprintf(`{"id": %q}`, sandbox.ID)), nil
+		
+		response := fmt.Sprintf(`{"id": %q, "workdir": %q`, sandbox.ID, sandbox.Workdir)
+		if sandbox.GitState != nil && sandbox.GitState.IsRepository {
+			response += fmt.Sprintf(`, "git": {
+	"repository": true,
+	"branch": %q,
+	"commit": %q,
+	"content_included": %t
+}`, sandbox.GitState.CurrentBranch, sandbox.GitState.CurrentCommit[:8], includeGitContent)
+		} else {
+			response += `, "git": {"repository": false}`
+		}
+		response += "}"
+		
+		return mcp.NewToolResultText(response), nil
 	},
 }
+
+
 
 var ContainerListTool = &Tool{
 	Definition: mcp.NewTool("container_list",
@@ -598,6 +633,67 @@ var ContainerFileDeleteTool = &Tool{
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("file %s deleted successfully", targetFile)), nil
+	},
+}
+
+var GitInfoTool = &Tool{
+	Definition: mcp.NewTool("git_info",
+		mcp.WithDescription("Get information about the current git repository state, including branch, commit, and uncommitted changes."),
+	),
+	Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		gitState, err := GetGitState()
+		if err != nil {
+			return mcp.NewToolResultErrorFromErr("failed to get git state", err), nil
+		}
+		
+		if !gitState.IsRepository {
+			return mcp.NewToolResultText(`{"repository": false, "message": "Not in a git repository"}`), nil
+		}
+		
+		response := fmt.Sprintf(`{
+	"repository": true,
+	"root_path": %q,
+	"current_branch": %q,
+	"current_commit": %q,
+	"remote_url": %q,
+	"captured_at": %q
+}`, gitState.RootPath, gitState.CurrentBranch, gitState.CurrentCommit, gitState.RemoteURL, 
+		gitState.CapturedAt.Format("2006-01-02 15:04:05"))
+		
+		return mcp.NewToolResultText(response), nil
+	},
+}
+
+var ContainerSyncTool = &Tool{
+	Definition: mcp.NewTool("container_sync",
+		mcp.WithDescription("Manually sync container commits to host repository as remote refs."),
+		mcp.WithString("explanation",
+			mcp.Description("One sentence explanation for why this sync is being performed."),
+		),
+		mcp.WithString("container_id",
+			mcp.Description("The ID of the container to sync. Must call `container_create` first."),
+			mcp.Required(),
+		),
+	),
+	Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		containerID, err := request.RequireString("container_id")
+		if err != nil {
+			return nil, err
+		}
+		container := GetContainer(containerID)
+		if container == nil {
+			return nil, errors.New("container not found")
+		}
+
+		if container.GitState == nil || !container.GitState.IsRepository {
+			return mcp.NewToolResultText("Container does not have git content - no sync needed"), nil
+		}
+
+		if err := container.syncToHost(ctx, container.state); err != nil {
+			return mcp.NewToolResultErrorFromErr("failed to sync container to host", err), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Container %s synced to host repository as remote branch %s", container.Name, container.BranchName)), nil
 	},
 }
 

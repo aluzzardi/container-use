@@ -38,11 +38,27 @@ func (s *Container) FileRead(ctx context.Context, targetFile string, shouldReadE
 }
 
 func (s *Container) FileWrite(ctx context.Context, explanation, targetFile, contents string) error {
-	return s.apply(ctx, "Write "+targetFile, explanation, s.state.WithNewFile(targetFile, contents))
+	newState := s.state.WithNewFile(targetFile, contents)
+	
+	var err error
+	newState, err = s.withGitCommit(ctx, newState, fmt.Sprintf("Write %s: %s", targetFile, explanation))
+	if err != nil {
+		return err
+	}
+	
+	return s.apply(ctx, "Write "+targetFile, explanation, newState)
 }
 
 func (s *Container) FileDelete(ctx context.Context, explanation, targetFile string) error {
-	return s.apply(ctx, "Delete "+targetFile, explanation, s.state.WithoutFile(targetFile))
+	newState := s.state.WithoutFile(targetFile)
+	
+	var err error
+	newState, err = s.withGitCommit(ctx, newState, fmt.Sprintf("Delete %s: %s", targetFile, explanation))
+	if err != nil {
+		return err
+	}
+	
+	return s.apply(ctx, "Delete "+targetFile, explanation, newState)
 }
 
 func (s *Container) FileList(ctx context.Context, path string) (string, error) {
@@ -71,7 +87,15 @@ func urlToDirectory(url string) *dagger.Directory {
 }
 
 func (s *Container) Upload(ctx context.Context, explanation, source string, target string) error {
-	return s.apply(ctx, "Upload "+source+" to "+target, explanation, s.state.WithDirectory(target, urlToDirectory(source)))
+	newState := s.state.WithDirectory(target, urlToDirectory(source))
+	
+	var err error
+	newState, err = s.withGitCommit(ctx, newState, fmt.Sprintf("Upload %s to %s: %s", source, target, explanation))
+	if err != nil {
+		return err
+	}
+	
+	return s.apply(ctx, "Upload "+source+" to "+target, explanation, newState)
 }
 
 func (s *Container) Download(ctx context.Context, source string, target string) error {

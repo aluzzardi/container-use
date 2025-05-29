@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,11 +55,13 @@ func (h History) Get(version Version) *Revision {
 }
 
 type Container struct {
-	ID      string  `json:"id"`
-	Name    string  `json:"name"`
-	Image   string  `json:"image"`
-	Workdir string  `json:"workdir"`
-	History History `json:"history"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Image      string    `json:"image"`
+	Workdir    string    `json:"workdir"`
+	History    History   `json:"history"`
+	GitState   *GitState `json:"git_state,omitempty"`
+	BranchName string    `json:"branch_name,omitempty"`
 
 	mu    sync.Mutex
 	state *dagger.Container
@@ -74,22 +78,68 @@ func LoadContainers() error {
 	return nil
 }
 
-func CreateContainer(name, explanation, image, workdir string) (*Container, error) {
-	container := &Container{
-		ID:      uuid.New().String(),
-		Name:    name,
-		Image:   image,
-		Workdir: workdir,
+func CreateContainer(name, explanation, image, workdir string, includeGitContent bool) (*Container, error) {
+	gitState, err := GetGitState()
+	if err != nil {
+		return nil, fmt.Errorf("failed to capture git state: %v", err)
 	}
-	err := container.apply(context.Background(), "Create container from "+image, explanation, dag.Container().
-		From(image).
-		WithWorkdir(workdir).
-		WithDirectory(".", dag.Directory())) // Force workdir to exist
 
+	container := &Container{
+		ID:       uuid.New().String(),
+		Name:     name,
+		Image:    image,
+		Workdir:  workdir,
+		GitState: gitState,
+	}
+
+	if gitState.IsRepository {
+		container.BranchName = "container-" + container.ID[:8]
+	}
+
+	containerState := dag.Container().From(image).WithWorkdir(workdir)
+
+	if gitState.IsRepository && includeGitContent {
+		hostDir := dag.Host().Directory(".")
+		containerState = containerState.WithDirectory("/git-repo", hostDir)
+
+		containerState = containerState.WithExec([]string{"sh", "-c", "command -v git || (apk add --no-cache git 2>/dev/null || apt-get update && apt-get install -y git 2>/dev/null || yum install -y git 2>/dev/null || true)"})
+		containerState = containerState.WithExec([]string{"git", "config", "--global", "user.email", "container@example.com"})
+		containerState = containerState.WithExec([]string{"git", "config", "--global", "user.name", "Container User"})
+
+		containerState = containerState.WithExec([]string{"git", "checkout", "-b", container.BranchName})
+
+		if hasUncommittedChanges() {
+			containerState = containerState.WithWorkdir("/git-repo")
+			containerState = containerState.WithExec([]string{"git", "add", "."})
+			commitMessage := fmt.Sprintf("Container creation commit: %s", explanation)
+			containerState = containerState.WithExec([]string{"git", "commit", "-m", commitMessage})
+
+			commitHash, err := containerState.WithExec([]string{"git", "rev-parse", "HEAD"}).Stdout(context.Background())
+			if err != nil {
+				return nil, fmt.Errorf("failed to get commit hash: %v", err)
+			}
+
+			gitState.CurrentCommit = strings.TrimSpace(commitHash)
+			container.GitState = gitState
+
+			containerState = containerState.WithWorkdir(workdir)
+		}
+	} else {
+		containerState = containerState.WithDirectory(".", dag.Directory())
+	}
+
+	err = container.apply(context.Background(), "Create container from "+image, explanation, containerState)
 	if err != nil {
 		return nil, err
 	}
 	containers[container.ID] = container
+
+	if container.GitState != nil && container.GitState.IsRepository {
+		if err := container.syncToHost(context.Background(), container.state); err != nil {
+			fmt.Fprintf(debugWriter, "Warning: failed initial sync to host: %v\n", err)
+		}
+	}
+
 	return container, nil
 }
 
@@ -143,6 +193,12 @@ func (s *Container) Run(ctx context.Context, explanation, command, shell string)
 		}
 		return "", err
 	}
+
+	newState, err = s.withGitCommit(ctx, newState, fmt.Sprintf("Run %s: %s", command, explanation))
+	if err != nil {
+		return "", err
+	}
+
 	if err := s.apply(ctx, "Run "+command, explanation, newState); err != nil {
 		return "", err
 	}
@@ -217,4 +273,63 @@ func (s *Container) Fork(ctx context.Context, explanation, name string, version 
 	}
 	containers[forkedContainer.ID] = forkedContainer
 	return forkedContainer, nil
+}
+
+func (s *Container) withGitCommit(ctx context.Context, state *dagger.Container, commitMessage string) (*dagger.Container, error) {
+	if s.GitState != nil && s.GitState.IsRepository {
+		newState := state.WithWorkdir("/git-repo").
+			WithExec([]string{"git", "add", "."}).
+			WithExec([]string{"sh", "-c", "git diff --staged --quiet || git commit -m '" + commitMessage + "'"})
+
+		commitHash, err := newState.WithExec([]string{"git", "rev-parse", "HEAD"}).Stdout(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		s.GitState.CurrentCommit = strings.TrimSpace(commitHash)
+
+		finalState := newState.WithWorkdir(s.Workdir)
+
+		if err := s.syncToHost(ctx, finalState); err != nil {
+			fmt.Fprintf(debugWriter, "Warning: failed to sync to host: %v\n", err)
+		}
+
+		return finalState, nil
+	}
+	return state, nil
+}
+
+func (s *Container) createBundle(ctx context.Context, state *dagger.Container) ([]byte, error) {
+	if s.GitState == nil || !s.GitState.IsRepository {
+		return nil, fmt.Errorf("container does not have git content")
+	}
+
+	bundleState := state.WithWorkdir("/git-repo").
+		WithExec([]string{"git", "bundle", "create", "/tmp/container.bundle", "--all"}).
+		WithExec([]string{"sh", "-c", "base64 /tmp/container.bundle > /tmp/container.bundle.b64"})
+
+	bundleDataB64, err := bundleState.File("/tmp/container.bundle.b64").Contents(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create bundle: %v", err)
+	}
+
+	bundleData, err := base64.StdEncoding.DecodeString(strings.TrimSpace(bundleDataB64))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode bundle: %v", err)
+	}
+
+	return bundleData, nil
+}
+
+func (s *Container) syncToHost(ctx context.Context, state *dagger.Container) error {
+	if s.GitState == nil || !s.GitState.IsRepository {
+		return nil
+	}
+
+	bundleData, err := s.createBundle(ctx, state)
+	if err != nil {
+		return fmt.Errorf("failed to create bundle: %v", err)
+	}
+
+	return SyncBundleToHost(bundleData, s.ID, s.BranchName)
 }
