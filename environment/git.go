@@ -74,7 +74,11 @@ func (env *Environment) DeleteLocalRemoteBranch() error {
 	return nil
 }
 
-func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath string) (string, error) {
+func (env *Environment) GetInitialWorktreePath() (string, error) {
+	return homedir.Expand(fmt.Sprintf("~/.config/container-use/initial-worktrees/%s", env.ID))
+}
+
+func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath string, initial bool) (string, error) {
 	localRepoPath, err := filepath.Abs(localRepoPath)
 	if err != nil {
 		return "", err
@@ -85,16 +89,22 @@ func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath st
 		return "", err
 	}
 
-	worktreePath, err := env.GetWorktreePath()
+	var worktreePath string
+	if initial {
+		worktreePath, err = env.GetInitialWorktreePath()
+	} else {
+		worktreePath, err = env.GetWorktreePath()
+	}
 	if err != nil {
 		return "", err
 	}
 
+	// exit early if worktree already exists
 	if _, err := os.Stat(worktreePath); err == nil {
 		return worktreePath, nil
 	}
 
-	slog.Info("Initializing worktree", "container-id", env.ID, "container-name", env.Name, "id", env.ID)
+	slog.Info("Initializing worktree", "container-id", env.ID, "container-name", env.Name, "id", env.ID, "initial", initial)
 	_, err = runGitCommand(ctx, localRepoPath, "fetch", "container-use")
 	if err != nil {
 		return "", err
@@ -113,15 +123,20 @@ func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath st
 		return "", err
 	}
 
+	worktreeBranch := env.ID
+	if initial {
+		worktreeBranch = fmt.Sprintf("initial/%s", env.ID)
+	}
+
 	// create worktree, accomodating past partial failures where the branch pushed but the worktree wasn't created
-	_, err = runGitCommand(ctx, cuRepoPath, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", env.ID))
+	_, err = runGitCommand(ctx, cuRepoPath, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", worktreeBranch))
 	if err != nil {
-		_, err = runGitCommand(ctx, cuRepoPath, "worktree", "add", "-b", env.ID, worktreePath, currentBranch)
+		_, err = runGitCommand(ctx, cuRepoPath, "worktree", "add", "-b", worktreeBranch, worktreePath, currentBranch)
 		if err != nil {
 			return "", err
 		}
 	} else {
-		_, err = runGitCommand(ctx, cuRepoPath, "worktree", "add", worktreePath, env.ID)
+		_, err = runGitCommand(ctx, cuRepoPath, "worktree", "add", worktreePath, worktreeBranch)
 		if err != nil {
 			return "", err
 		}
@@ -129,6 +144,17 @@ func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath st
 
 	if err := env.applyUncommittedChanges(ctx, localRepoPath, worktreePath); err != nil {
 		return "", fmt.Errorf("failed to apply uncommitted changes: %w", err)
+	}
+
+	// tagName := fmt.Sprintf("%s/initial", env.ID)
+	// _, err = runGitCommand(ctx, worktreePath, "tag", tagName)
+	// if err != nil {
+	// 	return "", fmt.Errorf("failed to tag initial commit: %w", err)
+	// }
+
+	// no tracking necessary for initial branches
+	if initial {
+		return worktreePath, nil
 	}
 
 	_, err = runGitCommand(ctx, localRepoPath, "fetch", "container-use", env.ID)
@@ -172,7 +198,6 @@ func InitializeLocalRemote(ctx context.Context, localRepoPath string) (string, e
 		}
 	}
 
-	// set up local remote, updating it if it had been created previously at a different path
 	existingURL, err := runGitCommand(ctx, localRepoPath, "remote", "get-url", "container-use")
 	if err != nil {
 		_, err = runGitCommand(ctx, localRepoPath, "remote", "add", "container-use", cuRepoPath)
@@ -181,6 +206,7 @@ func InitializeLocalRemote(ctx context.Context, localRepoPath string) (string, e
 		}
 	} else {
 		existingURL = strings.TrimSpace(existingURL)
+		// handle renamed source repository
 		if existingURL != cuRepoPath {
 			_, err = runGitCommand(ctx, localRepoPath, "remote", "set-url", "container-use", cuRepoPath)
 			if err != nil {
@@ -233,11 +259,17 @@ func (env *Environment) propagateToWorktree(ctx context.Context, name, explanati
 		return err
 	}
 
-	_, err = env.container.Directory(env.Workdir).Export(
-		ctx,
-		worktreePath,
-		dagger.DirectoryExportOpts{Wipe: true},
-	)
+	_, err = env.container.
+		Directory(env.Workdir).
+		WithFile(
+			".git",
+			dag.Host().File(filepath.Join(worktreePath, ".git")),
+		).
+		Export(
+			ctx,
+			worktreePath,
+			dagger.DirectoryExportOpts{Wipe: true},
+		)
 	if err != nil {
 		return err
 	}

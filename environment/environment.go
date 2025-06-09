@@ -183,13 +183,18 @@ func Create(ctx context.Context, explanation, source, name string) (*Environment
 		}
 	}
 
-	worktreePath, err := env.InitializeWorktree(ctx, source)
+	worktreePath, err := env.InitializeWorktree(ctx, source, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed intializing worktree: %w", err)
 	}
 	env.Worktree = worktreePath
 
-	container, err := env.buildBase(ctx)
+	initialWorktree, err := env.InitializeWorktree(ctx, env.Source, true)
+	if err != nil {
+		return nil, err
+	}
+
+	container, err := env.buildBase(ctx, initialWorktree)
 	if err != nil {
 		return nil, err
 	}
@@ -209,15 +214,13 @@ func Create(ctx context.Context, explanation, source, name string) (*Environment
 }
 
 func Open(ctx context.Context, explanation, source, id string) (*Environment, error) {
-	// FIXME(aluzzardi): DO NOT USE THIS FUNCTION. It's broken.
-
 	name, _, _ := strings.Cut(id, "/")
 	env := &Environment{
 		Name:   name,
 		ID:     id,
 		Source: source,
 	}
-	worktreePath, err := env.InitializeWorktree(ctx, source)
+	worktreePath, err := env.InitializeWorktree(ctx, source, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed intializing worktree: %w", err)
 	}
@@ -230,7 +233,12 @@ func Open(ctx context.Context, explanation, source, id string) (*Environment, er
 		return nil, err
 	}
 
-	container, err := env.buildBase(ctx)
+	initialWorktree, err := env.GetInitialWorktreePath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get initial worktree path: %w", err)
+	}
+
+	container, err := env.buildBase(ctx, initialWorktree)
 	if err != nil {
 		return nil, err
 	}
@@ -240,23 +248,22 @@ func Open(ctx context.Context, explanation, source, id string) (*Environment, er
 
 	environments[env.ID] = env
 
+	if err := env.loadStateFromNotes(ctx, worktreePath); err != nil {
+		return nil, fmt.Errorf("failed to load state from notes: %w", err)
+	}
+
+	for _, revision := range env.History {
+		revision.container = dag.LoadContainerFromID(dagger.ContainerID(revision.State))
+	}
+	if latest := env.History.Latest(); latest != nil {
+		env.container = latest.container
+	}
+
 	return env, nil
-
-	// FIXME(aluzzardi): BROKEN
-	// if err := env.loadStateFromNotes(ctx, worktreePath); err != nil {
-	// 	return nil, fmt.Errorf("failed to load state from notes: %w", err)
-	// }
-
-	// for _, revision := range env.History {
-	// 	revision.container = dag.LoadContainerFromID(dagger.ContainerID(revision.State))
-	// }
-	// if latest := env.History.Latest(); latest != nil {
-	// 	env.container = latest.container
-	// }
 }
 
-func (env *Environment) buildBase(ctx context.Context) (*dagger.Container, error) {
-	sourceDir := dag.Host().Directory(env.Worktree)
+func (env *Environment) buildBase(ctx context.Context, initialWorktree string) (*dagger.Container, error) {
+	sourceDir := dag.Host().Directory(initialWorktree)
 
 	container := dag.
 		Container().
@@ -310,8 +317,13 @@ func (env *Environment) Update(ctx context.Context, explanation, instructions, b
 	env.SetupCommands = setupCommands
 	env.Secrets = secrets
 
+	initialWorktree, err := env.GetInitialWorktreePath()
+	if err != nil {
+		return err
+	}
+
 	// Re-build the base image from the worktree
-	container, err := env.buildBase(ctx)
+	container, err := env.buildBase(ctx, initialWorktree)
 	if err != nil {
 		return err
 	}
