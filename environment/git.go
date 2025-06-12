@@ -13,6 +13,9 @@ import (
 	"strings"
 
 	"dagger.io/dagger"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/mitchellh/go-homedir"
 )
 
@@ -41,8 +44,11 @@ func (env *Environment) DeleteWorktree() error {
 	if err != nil {
 		return err
 	}
+	
+	// With go-git's shared storage approach, we just need to remove the worktree directory
+	// The storage is shared with the bare repo, so no object cleanup needed
 	parentDir := filepath.Dir(worktreePath)
-	fmt.Printf("Deleting parent directory of worktree at %s\n", parentDir)
+	fmt.Printf("Deleting worktree directory at %s\n", parentDir)
 	return os.RemoveAll(parentDir)
 }
 
@@ -54,20 +60,49 @@ func (env *Environment) DeleteLocalRemoteBranch() error {
 	}
 	repoName := filepath.Base(localRepoPath)
 	cuRepoPath, err := getRepoPath(repoName)
+	if err != nil {
+		return err
+	}
 
+	// Open container-use repo for worktree operations
+	cuRepo, err := git.PlainOpen(cuRepoPath)
+	if err != nil {
+		return err
+	}
+
+	// Prune worktrees - keep as shell-out since it involves cleanup of worktree metadata
 	slog.Info("Pruning git worktrees", "repo", cuRepoPath)
 	if _, err = runGitCommand(context.Background(), cuRepoPath, "worktree", "prune"); err != nil {
 		slog.Error("Failed to prune git worktrees", "repo", cuRepoPath, "err", err)
 		return err
 	}
 
+	// Delete local branch
 	slog.Info("Deleting local branch", "repo", cuRepoPath, "branch", env.ID)
-	if _, err = runGitCommand(context.Background(), cuRepoPath, "branch", "-D", env.ID); err != nil {
+	branchRef := plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", env.ID))
+	err = cuRepo.Storer.RemoveReference(branchRef)
+	if err != nil {
 		slog.Error("Failed to delete local branch", "repo", cuRepoPath, "branch", env.ID, "err", err)
 		return err
 	}
 
-	if _, err = runGitCommand(context.Background(), localRepoPath, "remote", "prune", containerUseRemote); err != nil {
+	// Open local repo for remote operations
+	localRepo, err := git.PlainOpen(localRepoPath)
+	if err != nil {
+		return err
+	}
+
+	// Prune remote
+	remote, err := localRepo.Remote(containerUseRemote)
+	if err != nil {
+		slog.Error("Failed to get remote", "remote", containerUseRemote, "err", err)
+		return err
+	}
+
+	err = remote.Fetch(&git.FetchOptions{
+		Prune: true,
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		slog.Error("Failed to fetch and prune container-use remote", "local-repo", localRepoPath, "err", err)
 		return err
 	}
@@ -96,32 +131,62 @@ func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath st
 	}
 
 	slog.Info("Initializing worktree", "container-id", env.ID, "container-name", env.Name, "id", env.ID)
-	_, err = runGitCommand(ctx, localRepoPath, "fetch", containerUseRemote)
+
+	// Open local repo
+	localRepo, err := git.PlainOpen(localRepoPath)
 	if err != nil {
 		return "", err
 	}
 
-	currentBranch, err := runGitCommand(ctx, localRepoPath, "branch", "--show-current")
-	if err != nil {
-		return "", err
-	}
-	currentBranch = strings.TrimSpace(currentBranch)
-
-	// this is racy, i think? like if a human is rewriting history on a branch and creating containers, things get complicated.
-	// there's only 1 copy of the source branch in the localremote, so there's potential for conflicts.
-	_, err = runGitCommand(ctx, localRepoPath, "push", containerUseRemote, "--force", currentBranch)
+	// Fetch from container-use remote
+	remote, err := localRepo.Remote(containerUseRemote)
 	if err != nil {
 		return "", err
 	}
 
-	// create worktree, accomodating past partial failures where the branch pushed but the worktree wasn't created
-	_, err = runGitCommand(ctx, cuRepoPath, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", env.ID))
+	err = remote.FetchContext(ctx, &git.FetchOptions{})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return "", err
+	}
+
+	// Get current branch
+	head, err := localRepo.Head()
 	if err != nil {
+		return "", err
+	}
+	currentBranch := head.Name().Short()
+
+	// Push current branch to container-use remote (force push)
+	err = localRepo.PushContext(ctx, &git.PushOptions{
+		RemoteName: containerUseRemote,
+		RefSpecs: []config.RefSpec{
+			config.RefSpec(fmt.Sprintf("+%s:%s", head.Name(), head.Name())),
+		},
+		Force: true,
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return "", err
+	}
+
+	// Create worktree using git command (complex operation)
+	// Note: The go-git approach with separate storage/worktree filesystems
+	// can cause issues with bare repository object access, so we use git command
+	cuRepo, err := git.PlainOpen(cuRepoPath)
+	if err != nil {
+		return "", err
+	}
+
+	// Check if branch exists
+	branchRef := plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", env.ID))
+	_, err = cuRepo.Reference(branchRef, true)
+	if err != nil {
+		// Branch doesn't exist, create worktree with new branch
 		_, err = runGitCommand(ctx, cuRepoPath, "worktree", "add", "-b", env.ID, worktreePath, currentBranch)
 		if err != nil {
 			return "", err
 		}
 	} else {
+		// Branch exists, create worktree with existing branch
 		_, err = runGitCommand(ctx, cuRepoPath, "worktree", "add", worktreePath, env.ID)
 		if err != nil {
 			return "", err
@@ -132,18 +197,46 @@ func (env *Environment) InitializeWorktree(ctx context.Context, localRepoPath st
 		return "", fmt.Errorf("failed to apply uncommitted changes: %w", err)
 	}
 
-	_, err = runGitCommand(ctx, localRepoPath, "fetch", containerUseRemote, env.ID)
-	if err != nil {
+	// Fetch the environment branch to local repo
+	err = remote.FetchContext(ctx, &git.FetchOptions{
+		RefSpecs: []config.RefSpec{
+			config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/remotes/%s/%s", env.ID, containerUseRemote, env.ID)),
+		},
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return "", err
 	}
 
-	// set up remote tracking branch if it's not already there
-	_, err = runGitCommand(ctx, localRepoPath, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", env.ID))
+	// Set up tracking branch if not already there
+	envBranchRef := plumbing.ReferenceName(fmt.Sprintf("refs/heads/%s", env.ID))
+	_, err = localRepo.Reference(envBranchRef, true)
 	if err != nil {
-		_, err = runGitCommand(ctx, localRepoPath, "branch", "--track", env.ID, fmt.Sprintf("%s/%s", containerUseRemote, env.ID))
+		// Create tracking branch
+		remoteBranchRef := plumbing.ReferenceName(fmt.Sprintf("refs/remotes/%s/%s", containerUseRemote, env.ID))
+		remoteRef, err := localRepo.Reference(remoteBranchRef, true)
 		if err != nil {
 			return "", err
 		}
+
+		newRef := plumbing.NewHashReference(envBranchRef, remoteRef.Hash())
+		err = localRepo.Storer.SetReference(newRef)
+		if err != nil {
+			return "", err
+		}
+
+		// Set up tracking configuration
+		cfg, err := localRepo.Config()
+		if err != nil {
+			return "", err
+		}
+
+		cfg.Branches[env.ID] = &config.Branch{
+			Name:   env.ID,
+			Remote: containerUseRemote,
+			Merge:  envBranchRef,
+		}
+
+		localRepo.Storer.SetConfig(cfg)
 	}
 
 	return worktreePath, nil
@@ -167,31 +260,54 @@ func InitializeLocalRemote(ctx context.Context, localRepoPath string) (string, e
 		}
 
 		slog.Info("Initializing local remote", "local-repo-path", localRepoPath, "container-use-repo-path", cuRepoPath)
-		_, err = runGitCommand(ctx, localRepoPath, "clone", "--bare", localRepoPath, cuRepoPath)
+		
+		// Clone as bare repository
+		_, err = git.PlainClone(cuRepoPath, true, &git.CloneOptions{
+			URL: localRepoPath,
+		})
 		if err != nil {
 			return "", err
 		}
 	}
 
-	// set up local remote, updating it if it had been created previously at a different path
-	existingURL, err := runGitCommand(ctx, localRepoPath, "remote", "get-url", containerUseRemote)
+	// Open local repo
+	localRepo, err := git.PlainOpen(localRepoPath)
 	if err != nil {
-		_, err = runGitCommand(ctx, localRepoPath, "remote", "add", containerUseRemote, cuRepoPath)
+		return "", err
+	}
+
+	// Check if remote exists
+	_, err = localRepo.Remote(containerUseRemote)
+	if err != nil {
+		// Remote doesn't exist, create it
+		_, err = localRepo.CreateRemote(&config.RemoteConfig{
+			Name: containerUseRemote,
+			URLs: []string{cuRepoPath},
+		})
 		if err != nil {
 			return "", err
 		}
 	} else {
-		existingURL = strings.TrimSpace(existingURL)
-		if existingURL != cuRepoPath {
-			_, err = runGitCommand(ctx, localRepoPath, "remote", "set-url", containerUseRemote, cuRepoPath)
+		// Remote exists, update URL if necessary
+		cfg, err := localRepo.Config()
+		if err != nil {
+			return "", err
+		}
+
+		remoteCfg := cfg.Remotes[containerUseRemote]
+		if len(remoteCfg.URLs) == 0 || remoteCfg.URLs[0] != cuRepoPath {
+			remoteCfg.URLs = []string{cuRepoPath}
+			err = localRepo.Storer.SetConfig(cfg)
 			if err != nil {
 				return "", err
 			}
 		}
 	}
+
 	return cuRepoPath, nil
 }
 
+// Keep git command runner for complex operations
 func runGitCommand(ctx context.Context, dir string, args ...string) (out string, rerr error) {
 	slog.Info(fmt.Sprintf("[%s] $ git %s", dir, strings.Join(args, " ")))
 	defer func() {
@@ -262,7 +378,22 @@ func (env *Environment) propagateToWorktree(ctx context.Context, name, explanati
 	}
 
 	slog.Info("Fetching container-use remote in source repository")
-	if _, err := runGitCommand(ctx, localRepoPath, "fetch", containerUseRemote, env.ID); err != nil {
+	localRepo, err := git.PlainOpen(localRepoPath)
+	if err != nil {
+		return err
+	}
+
+	remote, err := localRepo.Remote(containerUseRemote)
+	if err != nil {
+		return err
+	}
+
+	err = remote.FetchContext(ctx, &git.FetchOptions{
+		RefSpecs: []config.RefSpec{
+			config.RefSpec(fmt.Sprintf("refs/heads/%s:refs/remotes/%s/%s", env.ID, containerUseRemote, env.ID)),
+		},
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return err
 	}
 
@@ -273,6 +404,7 @@ func (env *Environment) propagateToWorktree(ctx context.Context, name, explanati
 	return nil
 }
 
+// Keep git notes operations as shell-outs (complex)
 func (env *Environment) propagateGitNotes(ctx context.Context, ref string) error {
 	fullRef := fmt.Sprintf("refs/notes/%s", ref)
 	fetch := func() error {
@@ -363,9 +495,6 @@ func (env *Environment) commitWorktreeChanges(ctx context.Context, worktreePath,
 	return err
 }
 
-// AI slop below!
-// this is just to keep us moving fast because big git repos get hard to work with
-// and our demos like to download large dependencies.
 func (env *Environment) addNonBinaryFiles(ctx context.Context, worktreePath string) error {
 	statusOutput, err := runGitCommand(ctx, worktreePath, "status", "--porcelain")
 	if err != nil {
@@ -468,18 +597,31 @@ func (env *Environment) shouldSkipFile(fileName string) bool {
 	return false
 }
 
+// Keep patch application as shell-out (complex)
 func (env *Environment) applyUncommittedChanges(ctx context.Context, localRepoPath, worktreePath string) error {
-	status, err := runGitCommand(ctx, localRepoPath, "status", "--porcelain")
+	// Check for uncommitted changes using go-git
+	localRepo, err := git.PlainOpen(localRepoPath)
 	if err != nil {
 		return err
 	}
 
-	if strings.TrimSpace(status) == "" {
+	worktree, err := localRepo.Worktree()
+	if err != nil {
+		return err
+	}
+
+	status, err := worktree.Status()
+	if err != nil {
+		return err
+	}
+
+	if status.IsClean() {
 		return nil
 	}
 
 	slog.Info("Applying uncommitted changes to worktree", "container-id", env.ID, "container-name", env.Name)
 
+	// Use git command for patch generation and application (complex)
 	patch, err := runGitCommand(ctx, localRepoPath, "diff", "HEAD")
 	if err != nil {
 		return err
