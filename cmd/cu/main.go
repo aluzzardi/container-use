@@ -13,6 +13,7 @@ import (
 
 	"dagger.io/dagger"
 	"github.com/dagger/container-use/environment"
+	"github.com/dagger/container-use/environment/remotes"
 	"github.com/dagger/container-use/mcpserver"
 	"github.com/spf13/cobra"
 )
@@ -49,7 +50,8 @@ var (
 			}
 			defer dag.Close()
 
-			environment.Initialize(dag)
+			localRemote := remotes.NewLocalRemote(dag)
+			environment.Initialize(dag, localRemote)
 			return mcpserver.RunStdioServer(ctx)
 		},
 	}

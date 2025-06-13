@@ -120,32 +120,26 @@ func init() {
 }
 
 type EnvironmentResponse struct {
-	ID               string   `json:"id"`
-	BaseImage        string   `json:"base_image"`
-	SetupCommands    []string `json:"setup_commands"`
-	Instructions     string   `json:"instructions"`
-	Workdir          string   `json:"workdir"`
-	Branch           string   `json:"branch"`
-	TrackingBranch   string   `json:"tracking_branch"`
-	CheckoutCommand  string   `json:"checkout_command_for_human"`
-	HostWorktreePath string   `json:"host_worktree_path"`
+	ID              string   `json:"id"`
+	BaseImage       string   `json:"base_image"`
+	SetupCommands   []string `json:"setup_commands"`
+	Instructions    string   `json:"instructions"`
+	Workdir         string   `json:"workdir"`
+	Branch          string   `json:"branch"`
+	TrackingBranch  string   `json:"tracking_branch"`
+	CheckoutCommand string   `json:"checkout_command_for_human"`
 }
 
 func EnvironmentToCallResult(env *environment.Environment) (*mcp.CallToolResult, error) {
-	worktreePath, err := env.GetWorktreePath()
-	if err != nil {
-		return mcp.NewToolResultErrorFromErr("failed to get worktree", err), nil
-	}
 	resp := &EnvironmentResponse{
-		ID:               env.ID,
-		Instructions:     env.Instructions,
-		BaseImage:        env.BaseImage,
-		SetupCommands:    env.SetupCommands,
-		Workdir:          env.Workdir,
-		Branch:           env.ID,
-		TrackingBranch:   fmt.Sprintf("container-use/%s", env.ID),
-		CheckoutCommand:  fmt.Sprintf("git checkout %s", env.ID),
-		HostWorktreePath: worktreePath,
+		ID:              env.ID,
+		Instructions:    env.Instructions,
+		BaseImage:       env.BaseImage,
+		SetupCommands:   env.SetupCommands,
+		Workdir:         env.Workdir,
+		Branch:          env.ID,
+		TrackingBranch:  fmt.Sprintf("container-use/%s", env.ID),
+		CheckoutCommand: fmt.Sprintf("git checkout %s", env.ID),
 	}
 	out, err := json.Marshal(resp)
 	if err != nil {

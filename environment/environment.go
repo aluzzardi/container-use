@@ -2,13 +2,13 @@ package environment
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +19,7 @@ import (
 )
 
 var dag *dagger.Client
+var storage Remote
 
 const (
 	defaultImage     = "ubuntu:24.04"
@@ -68,16 +69,30 @@ func (h History) Get(version Version) *Revision {
 	return nil
 }
 
-func Initialize(client *dagger.Client) error {
+func Initialize(client *dagger.Client, remoteStorage Remote) error {
 	dag = client
+	storage = remoteStorage
 	return nil
 }
 
+// Remote interface defines how environments interact with remote storage
+type Remote interface {
+	// RemoteUrl must ensure that a remote exists and returns the URL for the project storage.
+	// It must be called prior to all other operations.
+	RemoteUrl(project string) string
+	Create(*Environment) error
+	Save(*Environment, string, string) error
+	Note(*Environment, string) error
+	Patch(*Environment, string) error
+	Load(*Environment) error
+	Delete(repoName string, envName string) error
+	BaseProjectDir(*Environment) *dagger.Directory
+}
+
 type Environment struct {
-	ID       string `json:"-"`
-	Name     string `json:"-"`
-	Source   string `json:"-"`
-	Worktree string `json:"-"`
+	ID     string `json:"-"`
+	Name   string `json:"-"`
+	source string `json:"-"`
 
 	Instructions  string   `json:"-"`
 	Workdir       string   `json:"workdir"`
@@ -91,46 +106,12 @@ type Environment struct {
 	container *dagger.Container
 }
 
-func (env *Environment) save(baseDir string) error {
-	cfg := path.Join(baseDir, configDir)
-	if err := os.MkdirAll(cfg, 0755); err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(path.Join(cfg, instructionsFile), []byte(env.Instructions), 0644); err != nil {
-		return err
-	}
-
-	envState, err := json.MarshalIndent(env, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	if err := os.WriteFile(path.Join(cfg, environmentFile), envState, 0644); err != nil {
-		return err
-	}
-
-	return nil
+func (env *Environment) Source() string {
+	return env.source
 }
 
-func (env *Environment) load(baseDir string) error {
-	cfg := path.Join(baseDir, configDir)
-
-	instructions, err := os.ReadFile(path.Join(cfg, instructionsFile))
-	if err != nil {
-		return err
-	}
-	env.Instructions = string(instructions)
-
-	envState, err := os.ReadFile(path.Join(cfg, environmentFile))
-	if err != nil {
-		return err
-	}
-	if err := json.Unmarshal(envState, env); err != nil {
-		return err
-	}
-
-	return nil
+func (env *Environment) Container() *dagger.Container {
+	return env.container
 }
 
 func (env *Environment) isLocked(baseDir string) bool {
@@ -172,22 +153,39 @@ func Create(ctx context.Context, explanation, source, name string) (*Environment
 	env := &Environment{
 		ID:           fmt.Sprintf("%s/%s", name, petname.Generate(2, "-")),
 		Name:         name,
-		Source:       source,
+		source:       source,
 		BaseImage:    defaultImage,
 		Instructions: "No instructions found. Please look around the filesystem and update me",
 		Workdir:      "/workdir",
 	}
-	if err := env.load(source); err != nil {
+
+	// maybe rename to syncCurrentBranch or something?
+	if err := env.SetupTrackingBranch(ctx, source); err != nil {
+		return nil, fmt.Errorf("failed setting up tracking branch: %w", err)
+	}
+
+	if err := storage.Create(env); err != nil {
+		return nil, err
+	}
+
+	if err := storage.Load(env); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
 	}
 
-	worktreePath, err := env.InitializeWorktree(ctx, source)
+	// Generate patch from uncommitted changes in the source repo
+	patch, err := env.GeneratePatch(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed intializing worktree: %w", err)
+		return nil, fmt.Errorf("failed to generate patch: %w", err)
 	}
-	env.Worktree = worktreePath
+
+	// Apply the patch if there are any changes
+	if patch != "" {
+		if err := storage.Patch(env, patch); err != nil {
+			return nil, fmt.Errorf("failed to apply patch: %w", err)
+		}
+	}
 
 	container, err := env.buildBase(ctx)
 	if err != nil {
@@ -201,29 +199,29 @@ func Create(ctx context.Context, explanation, source, name string) (*Environment
 	}
 	environments[env.ID] = env
 
-	if err := env.propagateToWorktree(ctx, "Init env "+name, explanation); err != nil {
-		return nil, fmt.Errorf("failed to propagate to worktree: %w", err)
+	if err := env.PropagateToTrackedBranch(ctx, "Init env "+name, explanation); err != nil {
+		return nil, fmt.Errorf("failed to propagate to tracking branch: %w", err)
 	}
 
 	return env, nil
 }
 
 func Open(ctx context.Context, explanation, source, id string) (*Environment, error) {
-	// FIXME(aluzzardi): DO NOT USE THIS FUNCTION. It's broken.
-
 	name, _, _ := strings.Cut(id, "/")
 	env := &Environment{
 		Name:   name,
 		ID:     id,
-		Source: source,
+		source: source,
 	}
-	worktreePath, err := env.InitializeWorktree(ctx, source)
-	if err != nil {
-		return nil, fmt.Errorf("failed intializing worktree: %w", err)
+	if err := env.SetupTrackingBranch(ctx, source); err != nil {
+		return nil, fmt.Errorf("failed setting up tracking branch: %w", err)
 	}
-	env.Worktree = worktreePath
 
-	if err := env.load(worktreePath); err != nil {
+	if err := storage.Create(env); err != nil {
+		return nil, err
+	}
+
+	if err := storage.Load(env); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Create(ctx, explanation, source, name)
 		}
@@ -256,12 +254,15 @@ func Open(ctx context.Context, explanation, source, id string) (*Environment, er
 }
 
 func (env *Environment) buildBase(ctx context.Context) (*dagger.Container, error) {
-	sourceDir := dag.Host().Directory(env.Worktree)
+	sourceDir := storage.BaseProjectDir(env)
 
 	container := dag.
 		Container().
 		From(env.BaseImage).
 		WithWorkdir(env.Workdir)
+
+	// Initialize log notes to ensure refs/notes/container-use exists
+	_ = env.addGitNote(ctx, fmt.Sprintf("Environment %s created with base image %s\n\n", env.ID, env.BaseImage))
 
 	for _, secret := range env.Secrets {
 		k, v, found := strings.Cut(secret, "=")
@@ -301,8 +302,8 @@ func (env *Environment) buildBase(ctx context.Context) (*dagger.Container, error
 }
 
 func (env *Environment) Update(ctx context.Context, explanation, instructions, baseImage string, setupCommands, secrets []string) error {
-	if env.isLocked(env.Source) {
-		return fmt.Errorf("Environment is locked, no updates allowed. Try to make do with the current environment or ask a human to remove the lock file (%s)", path.Join(env.Source, configDir, lockFile))
+	if env.isLocked(env.source) {
+		return fmt.Errorf("Environment is locked, no updates allowed. Try to make do with the current environment or ask a human to remove the lock file (%s)", path.Join(env.source, configDir, lockFile))
 	}
 
 	env.Instructions = instructions
@@ -320,7 +321,15 @@ func (env *Environment) Update(ctx context.Context, explanation, instructions, b
 		return err
 	}
 
-	return env.propagateToWorktree(ctx, "Update environment "+env.Name, explanation)
+	return env.PropagateToTrackedBranch(ctx, "Update environment "+env.Name, explanation)
+}
+
+func (env *Environment) getRepoName() (string, error) {
+	sourcePath, err := filepath.Abs(env.source)
+	if err != nil {
+		return "", fmt.Errorf("failed to get absolute path of source: %w", err)
+	}
+	return filepath.Base(sourcePath), nil
 }
 
 func Get(idOrName string) *Environment {
@@ -384,8 +393,8 @@ func (env *Environment) Run(ctx context.Context, explanation, command, shell str
 		return "", err
 	}
 
-	if err := env.propagateToWorktree(ctx, "Run "+command, explanation); err != nil {
-		return "", fmt.Errorf("failed to propagate to worktree: %w", err)
+	if err := env.PropagateToTrackedBranch(ctx, "Run "+command, explanation); err != nil {
+		return "", fmt.Errorf("failed to propagate to tracking branch: %w", err)
 	}
 
 	return stdout, nil
@@ -492,7 +501,7 @@ func (env *Environment) Revert(ctx context.Context, explanation string, version 
 	if err := env.apply(ctx, "Revert to "+revision.Name, explanation, "", revision.container); err != nil {
 		return err
 	}
-	return env.propagateToWorktree(ctx, "Revert to "+revision.Name, explanation)
+	return env.PropagateToTrackedBranch(ctx, "Revert to "+revision.Name, explanation)
 }
 
 func (env *Environment) Fork(ctx context.Context, explanation, name string, version *Version) (*Environment, error) {
@@ -540,12 +549,28 @@ func (env *Environment) Delete(ctx context.Context) error {
 	env.mu.Lock()
 	defer env.mu.Unlock()
 
-	if err := env.DeleteWorktree(); err != nil {
+	if err := env.DeleteTrackingBranch(); err != nil {
 		return err
 	}
 
-	if err := env.DeleteLocalRemoteBranch(); err != nil {
+	// Delegate storage deletion to the remote layer
+	repoName, err := env.getRepoName()
+	if err != nil {
 		return err
+	}
+	if err := storage.Delete(repoName, env.ID); err != nil {
+		return fmt.Errorf("failed to delete storage: %w", err)
+	}
+
+	// Fetch from remote with prune to delete remote-tracking branches
+	sourcePath, err := filepath.Abs(env.source)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path of source: %w", err)
+	}
+
+	_, err = runGitCommand(ctx, sourcePath, "fetch", containerUseRemote, "-p")
+	if err != nil {
+		slog.Warn("Failed to fetch and prune remote branches", "source", sourcePath, "err", err)
 	}
 
 	// Remove from global environments map

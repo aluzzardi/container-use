@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"dagger.io/dagger"
 	"github.com/dagger/container-use/environment"
+	"github.com/dagger/container-use/environment/remotes"
 	"github.com/spf13/cobra"
 )
 
@@ -23,12 +25,14 @@ var deleteCmd = &cobra.Command{
 			return fmt.Errorf("failed to connect to dagger: %w", err)
 		}
 		defer dag.Close()
-		environment.Initialize(dag)
+		localRemote := remotes.NewLocalRemote(dag)
+		environment.Initialize(dag, localRemote)
 
 		env := environment.Get(envName)
 		if env == nil {
 			// Try to open if not in memory
 			var openErr error
+			slog.Info("Opening environment for deletion", "name", envName)
 			env, openErr = environment.Open(ctx, "delete environment", ".", envName)
 			if openErr != nil {
 				return fmt.Errorf("environment '%s' not found: %w", envName, openErr)

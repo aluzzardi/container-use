@@ -41,7 +41,7 @@ func (s *Environment) FileWrite(ctx context.Context, explanation, targetFile, co
 		return fmt.Errorf("failed applying file write, skipping git propogation: %w", err)
 	}
 
-	return s.propagateToWorktree(ctx, "Write "+targetFile, explanation)
+	return storage.Save(s, "Write "+targetFile, explanation)
 }
 
 func (s *Environment) FileDelete(ctx context.Context, explanation, targetFile string) error {
@@ -50,7 +50,7 @@ func (s *Environment) FileDelete(ctx context.Context, explanation, targetFile st
 		return err
 	}
 
-	return s.propagateToWorktree(ctx, "Delete "+targetFile, explanation)
+	return storage.Save(s, "Delete "+targetFile, explanation)
 }
 
 func (s *Environment) FileList(ctx context.Context, path string) (string, error) {
@@ -84,7 +84,7 @@ func (s *Environment) Upload(ctx context.Context, explanation, source string, ta
 		return err
 	}
 
-	return s.propagateToWorktree(ctx, "Upload "+source+" to "+target, explanation)
+	return storage.Save(s, "Upload "+source+" to "+target, explanation)
 }
 
 func (s *Environment) Download(ctx context.Context, source string, target string) error {
