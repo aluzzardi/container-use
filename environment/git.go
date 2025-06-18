@@ -26,14 +26,25 @@ const (
 const maxFileSizeForTextCheck = 10 * 1024 * 1024
 
 func getRepoPath(repoName string) (string, error) {
+	// Allow overriding the config directory for tests
+	configDir := os.Getenv("CONTAINER_USE_CONFIG_DIR")
+	if configDir == "" {
+		configDir = "~/.config/container-use"
+	}
 	return homedir.Expand(fmt.Sprintf(
-		"~/.config/container-use/repos/%s",
+		"%s/repos/%s",
+		configDir,
 		filepath.Base(repoName),
 	))
 }
 
 func (env *Environment) GetWorktreePath() (string, error) {
-	return homedir.Expand(fmt.Sprintf("~/.config/container-use/worktrees/%s", env.ID))
+	// Allow overriding the config directory for tests
+	configDir := os.Getenv("CONTAINER_USE_CONFIG_DIR")
+	if configDir == "" {
+		configDir = "~/.config/container-use"
+	}
+	return homedir.Expand(fmt.Sprintf("%s/worktrees/%s", configDir, env.ID))
 }
 
 func (env *Environment) DeleteWorktree() error {
