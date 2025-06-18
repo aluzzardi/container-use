@@ -15,15 +15,35 @@ require (
 
 require (
 	github.com/99designs/gqlgen v0.17.74 // indirect
+	github.com/AlecAivazis/survey/v2 v2.3.7 // indirect
 	github.com/Khan/genqlient v0.8.1 // indirect
 	github.com/adrg/xdg v0.5.3 // indirect
+	github.com/atotto/clipboard v0.1.4 // indirect
+	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
+	github.com/charmbracelet/bubbles v0.16.1 // indirect
+	github.com/charmbracelet/bubbletea v0.24.2 // indirect
+	github.com/charmbracelet/lipgloss v0.7.1 // indirect
+	github.com/containerd/console v1.0.4-0.20230313162750-1ae8d489ac81 // indirect
+	github.com/erikgeiser/promptkit v0.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
+	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
+	github.com/mattn/go-colorable v0.1.14 // indirect
+	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-localereader v0.0.1 // indirect
+	github.com/mattn/go-runewidth v0.0.15 // indirect
+	github.com/mgutz/ansi v0.0.0-20170206155736-9520e82c474b // indirect
+	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
+	github.com/muesli/cancelreader v0.2.2 // indirect
+	github.com/muesli/reflow v0.3.0 // indirect
+	github.com/muesli/termenv v0.15.2 // indirect
 	github.com/pkg/term v1.1.0 // indirect
+	github.com/rivo/uniseg v0.4.4 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/sergi/go-diff v1.3.2-0.20230802210424-5b0b94c5c0d3 // indirect
 	github.com/sosodev/duration v1.3.1 // indirect
@@ -56,4 +76,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250603155806-513f23925822 // indirect
 	google.golang.org/grpc v1.73.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
