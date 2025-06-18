@@ -50,3 +50,47 @@ func (m *ContainerUse) Release(ctx context.Context,
 		Release().
 		Run(ctx)
 }
+
+// Test runs the test suite
+func (m *ContainerUse) Test(ctx context.Context,
+	//+optional
+	//+default="."
+	// Package to test
+	pkg string,
+	//+optional
+	// Run tests with verbose output
+	verboseOutput bool,
+	//+optional
+	// Run tests including integration tests
+	integration bool,
+) (string, error) {
+	ctr := dag.Go(m.Source).
+		Base().
+		WithMountedDirectory("/src", m.Source).
+		WithWorkdir("/src")
+	
+	args := []string{"go", "test"}
+	if verboseOutput {
+		args = append(args, "-v")
+	}
+	if !integration {
+		args = append(args, "-short")
+	}
+	args = append(args, pkg)
+	
+	return ctr.
+		WithExec(args).
+		Stdout(ctx)
+}
+
+// TestEnvironment runs the environment package tests specifically
+func (m *ContainerUse) TestEnvironment(ctx context.Context,
+	//+optional
+	// Run tests with verbose output
+	verboseOutput bool,
+	//+optional
+	// Include integration tests
+	integration bool,
+) (string, error) {
+	return m.Test(ctx, "./environment", verboseOutput, integration)
+}

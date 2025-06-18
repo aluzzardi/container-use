@@ -68,13 +68,17 @@ func (s *Environment) FileList(ctx context.Context, path string) (string, error)
 func urlToDirectory(url string) *dagger.Directory {
 	switch {
 	case strings.HasPrefix(url, "file://"):
-		return dag.Host().Directory(url[len("file://"):])
+		return dag.Host().Directory(url[len("file://"):], dagger.HostDirectoryOpts{
+			NoCache: true,
+		})
 	case strings.HasPrefix(url, "git://"):
 		return dag.Git(url[len("git://"):]).Head().Tree()
 	case strings.HasPrefix(url, "https://"):
 		return dag.Git(url[len("https://"):]).Head().Tree()
 	default:
-		return dag.Host().Directory(url)
+		return dag.Host().Directory(url, dagger.HostDirectoryOpts{
+			NoCache: true,
+		})
 	}
 }
 
