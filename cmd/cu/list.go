@@ -26,7 +26,7 @@ var listCmd = &cobra.Command{
 		}
 		if quiet, _ := app.Flags().GetBool("quiet"); quiet {
 			for _, env := range envs {
-				fmt.Println(env.Name)
+				fmt.Println(env.ID)
 			}
 			return nil
 		}
@@ -36,7 +36,7 @@ var listCmd = &cobra.Command{
 
 		defer tw.Flush()
 		for _, env := range envs {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", env.Name, env.State.Description, humanize.Time(env.State.CreatedAt), humanize.Time(env.State.UpdatedAt))
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", env.ID, env.State.Description, humanize.Time(env.State.CreatedAt), humanize.Time(env.State.UpdatedAt))
 		}
 		return nil
 	},

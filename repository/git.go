@@ -164,13 +164,11 @@ func (r *Repository) initializeWorktree(ctx context.Context, id string) (string,
 func (r *Repository) propagateToWorktree(ctx context.Context, env *environment.Environment, name, explanation string) (rerr error) {
 	slog.Info("Propagating to worktree...",
 		"environment.id", env.ID,
-		"environment.name", env.Name,
 		"workdir", env.Config.Workdir,
 		"id", env.ID)
 	defer func() {
 		slog.Info("Propagating to worktree... (DONE)",
 			"environment.id", env.ID,
-			"environment.name", env.Name,
 			"workdir", env.Config.Workdir,
 			"id", env.ID,
 			"err", rerr)

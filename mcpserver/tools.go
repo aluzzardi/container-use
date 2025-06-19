@@ -4,10 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/dagger/container-use/environment"
 	"github.com/dagger/container-use/repository"
@@ -15,42 +13,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
-
-func validateName(name string) error {
-	if name == "" {
-		return errors.New("name cannot be empty")
-	}
-
-	if strings.Contains(name, " ") {
-		return errors.New("name cannot contain spaces, use hyphens (-) instead")
-	}
-
-	if strings.Contains(name, "_") {
-		return errors.New("name cannot contain underscores, use hyphens (-) instead")
-	}
-
-	invalidChars := []string{"~", "^", ":", "?", "*", "[", "\\", "/", "\"", "<", ">", "|", "@", "{", "}", "..", "\t", "\n", "\r"}
-	for _, char := range invalidChars {
-		if strings.Contains(name, char) {
-			return fmt.Errorf("name cannot contain '%s'", char)
-		}
-	}
-
-	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") ||
-		strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
-		return errors.New("name cannot start or end with hyphen or dot")
-	}
-
-	if strings.HasSuffix(name, ".lock") {
-		return errors.New("name cannot end with '.lock'")
-	}
-
-	if len(name) > 100 {
-		return errors.New("name cannot exceed 244 bytes")
-	}
-
-	return nil
-}
 
 func openRepository(ctx context.Context, request mcp.CallToolRequest) (*repository.Repository, error) {
 	source, err := request.RequireString("environment_source")
@@ -225,29 +187,18 @@ DO NOT manually install toolchains inside the environment, instead explicitly ca
 			mcp.Description("Absolute path to the source git repository for the environment."),
 			mcp.Required(),
 		),
-		mcp.WithString("name",
-			mcp.Description("Name of the environment. Use hyphens (-) to separate words, no spaces or underscores allowed (e.g., 'my-web-app' not 'my web app' or 'my_web_app')"),
-			mcp.Required(),
-		),
 	),
 	Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		repo, err := openRepository(ctx, request)
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("unable to open the repository", err), nil
 		}
-		name, err := request.RequireString("name")
-		if err != nil {
-			return nil, err
-		}
 		description, err := request.RequireString("description")
 		if err != nil {
 			return nil, err
 		}
-		if err := validateName(name); err != nil {
-			return mcp.NewToolResultErrorFromErr("invalid name", err), nil
-		}
 
-		env, err := repo.Create(ctx, name, description, request.GetString("explanation", ""))
+		env, err := repo.Create(ctx, description, request.GetString("explanation", ""))
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to create environment", err), nil
 		}

@@ -26,7 +26,6 @@ type Environment struct {
 	State  *State
 
 	ID       string
-	Name     string
 	Worktree string
 
 	Services []*Service
@@ -35,10 +34,8 @@ type Environment struct {
 	mu sync.RWMutex
 }
 
-func New(ctx context.Context, id, name, description, worktree string) (*Environment, error) {
+func New(ctx context.Context, id, description, worktree string) (*Environment, error) {
 	env := &Environment{
-		ID:       id,
-		Name:     name,
 		Worktree: worktree,
 		Config:   DefaultConfig(),
 		State: &State{
@@ -59,7 +56,7 @@ func New(ctx context.Context, id, name, description, worktree string) (*Environm
 		return nil, err
 	}
 
-	slog.Info("Creating environment", "id", env.ID, "name", env.Name, "workdir", env.Config.Workdir)
+	slog.Info("Creating environment", "id", env.ID, "workdir", env.Config.Workdir)
 
 	if err := env.apply(ctx, "Create environment", "Create the environment", "", container); err != nil {
 		return nil, err
@@ -93,10 +90,9 @@ func (env *Environment) container() *dagger.Container {
 	return dag.LoadContainerFromID(dagger.ContainerID(env.State.Container))
 }
 
-func Load(ctx context.Context, id, name string, state []byte, worktree string) (*Environment, error) {
+func Load(ctx context.Context, id string, state []byte, worktree string) (*Environment, error) {
 	env := &Environment{
 		ID:       id,
-		Name:     id,
 		Worktree: worktree,
 		Config:   DefaultConfig(),
 		State:    &State{},
