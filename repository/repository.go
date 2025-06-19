@@ -203,3 +203,24 @@ func (r *Repository) Delete(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+func (r *Repository) Checkout(ctx context.Context, id string) (string, error) {
+	if err := r.exists(ctx, id); err != nil {
+		return "", err
+	}
+
+	branch := "cu-" + id
+
+	// set up remote tracking branch if it's not already there
+	_, err := runGitCommand(ctx, r.userRepoPath, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", branch))
+	if err != nil {
+		_, err = runGitCommand(ctx, r.userRepoPath, "branch", "--track", branch, fmt.Sprintf("%s/%s", containerUseRemote, id))
+		if err != nil {
+			return "", err
+		}
+	}
+
+	_, err = runGitCommand(ctx, r.userRepoPath, "checkout", branch)
+
+	return branch, err
+}
