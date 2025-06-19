@@ -2,7 +2,6 @@ package environment
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +9,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"dagger.io/dagger"
 )
@@ -23,6 +23,7 @@ func Initialize(client *dagger.Client) error {
 
 type Environment struct {
 	Config *EnvironmentConfig
+	State  *State
 
 	ID       string
 	Name     string
@@ -31,16 +32,20 @@ type Environment struct {
 	Services []*Service
 	Notes    Notes
 
-	mu        sync.Mutex
-	container *dagger.Container
+	mu sync.RWMutex
 }
 
-func New(ctx context.Context, id, name, worktree string) (*Environment, error) {
+func New(ctx context.Context, id, name, description, worktree string) (*Environment, error) {
 	env := &Environment{
 		ID:       id,
 		Name:     name,
 		Worktree: worktree,
 		Config:   DefaultConfig(),
+		State: &State{
+			Description: description,
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+		},
 	}
 
 	if err := env.Config.Load(worktree); err != nil {
@@ -64,7 +69,7 @@ func New(ctx context.Context, id, name, worktree string) (*Environment, error) {
 }
 
 func (env *Environment) Export(ctx context.Context) (rerr error) {
-	_, err := env.container.Directory(env.Config.Workdir).Export(
+	_, err := env.container().Directory(env.Config.Workdir).Export(
 		ctx,
 		env.Worktree,
 		dagger.DirectoryExportOpts{Wipe: true},
@@ -81,20 +86,11 @@ func (env *Environment) Export(ctx context.Context) (rerr error) {
 
 }
 
-func (env *Environment) State(ctx context.Context) ([]byte, error) {
-	containerID, err := env.container.ID(ctx)
-	if err != nil {
-		return nil, err
-	}
+func (env *Environment) container() *dagger.Container {
+	env.mu.RLock()
+	defer env.mu.RUnlock()
 
-	state := &State{
-		Container: string(containerID),
-	}
-	buff, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return buff, nil
+	return dag.LoadContainerFromID(dagger.ContainerID(env.State.Container))
 }
 
 func Load(ctx context.Context, id, name string, state []byte, worktree string) (*Environment, error) {
@@ -103,6 +99,7 @@ func Load(ctx context.Context, id, name string, state []byte, worktree string) (
 		Name:     id,
 		Worktree: worktree,
 		Config:   DefaultConfig(),
+		State:    &State{},
 	}
 	if err := env.Config.Load(worktree); err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -110,16 +107,9 @@ func Load(ctx context.Context, id, name string, state []byte, worktree string) (
 		}
 	}
 
-	var st *State
-	if err := json.Unmarshal(state, &st); err != nil {
-		// Try to migrate the legacy state
-		st, err = migrateLegacyState(state)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load state: %w", err)
-		}
+	if err := env.State.Unmarshal(state); err != nil {
+		return nil, err
 	}
-
-	env.container = dag.LoadContainerFromID(dagger.ContainerID(st.Container))
 
 	return env, nil
 }
@@ -129,9 +119,15 @@ func (env *Environment) apply(ctx context.Context, name, explanation, output str
 		return err
 	}
 
+	containerID, err := newState.ID(ctx)
+	if err != nil {
+		return err
+	}
+
 	env.mu.Lock()
 	defer env.mu.Unlock()
-	env.container = newState
+	env.State.UpdatedAt = time.Now()
+	env.State.Container = string(containerID)
 
 	return nil
 }
@@ -231,7 +227,7 @@ func (env *Environment) Run(ctx context.Context, explanation, command, shell str
 	if command != "" {
 		args = []string{shell, "-c", command}
 	}
-	newState := env.container.WithExec(args, dagger.ContainerWithExecOpts{
+	newState := env.container().WithExec(args, dagger.ContainerWithExecOpts{
 		UseEntrypoint: useEntrypoint,
 	})
 	stdout, err := newState.Stdout(ctx)
@@ -253,7 +249,7 @@ func (env *Environment) RunBackground(ctx context.Context, explanation, command,
 	if command != "" {
 		args = []string{shell, "-c", command}
 	}
-	serviceState := env.container
+	serviceState := env.container()
 
 	// Expose ports
 	for _, port := range ports {
@@ -315,7 +311,7 @@ func (env *Environment) RunBackground(ctx context.Context, explanation, command,
 }
 
 func (env *Environment) Terminal(ctx context.Context) error {
-	container := env.container
+	container := env.container()
 	var cmd []string
 	var sourceRC string
 	if shells, err := container.File("/etc/shells").Contents(ctx); err == nil {
@@ -347,5 +343,5 @@ func (env *Environment) Terminal(ctx context.Context) error {
 }
 
 func (env *Environment) Checkpoint(ctx context.Context, target string) (string, error) {
-	return env.container.Publish(ctx, target)
+	return env.container().Publish(ctx, target)
 }
