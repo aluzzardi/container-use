@@ -120,7 +120,6 @@ func (r *Repository) Get(ctx context.Context, id string) (*environment.Environme
 		return nil, err
 	}
 
-	name, _, _ := strings.Cut(id, "/")
 	worktree, err := r.initializeWorktree(ctx, id)
 	if err != nil {
 		return nil, err
@@ -131,7 +130,7 @@ func (r *Repository) Get(ctx context.Context, id string) (*environment.Environme
 		return nil, err
 	}
 
-	env, err := environment.Load(ctx, id, name, state, worktree)
+	env, err := environment.Load(ctx, id, state, worktree)
 	if err != nil {
 		return nil, err
 	}
@@ -139,19 +138,19 @@ func (r *Repository) Get(ctx context.Context, id string) (*environment.Environme
 	return env, nil
 }
 
-func (r *Repository) Create(ctx context.Context, name, explanation string) (*environment.Environment, error) {
-	id := fmt.Sprintf("%s/%s", name, petname.Generate(2, "-"))
+func (r *Repository) Create(ctx context.Context, description, explanation string) (*environment.Environment, error) {
+	id := petname.Generate(2, "-")
 	worktree, err := r.initializeWorktree(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	env, err := environment.New(ctx, id, name, worktree)
+	env, err := environment.New(ctx, id, description, worktree)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := r.propagateToWorktree(ctx, env, "Create env "+name, explanation); err != nil {
+	if err := r.propagateToWorktree(ctx, env, "Create env "+id, explanation); err != nil {
 		return nil, err
 	}
 
@@ -165,21 +164,33 @@ func (r *Repository) Update(ctx context.Context, env *environment.Environment, o
 	return r.propagateToWorktree(ctx, env, operation, explanation)
 }
 
-func (r *Repository) List(ctx context.Context) ([]string, error) {
+func (r *Repository) List(ctx context.Context) ([]*environment.Environment, error) {
 	branches, err := runGitCommand(ctx, r.forkRepoPath, "branch", "--format", "%(refname:short)")
 	if err != nil {
 		return nil, err
 	}
 
-	envs := []string{}
+	envs := []*environment.Environment{}
 	for _, branch := range strings.Split(branches, "\n") {
 		branch = strings.TrimSpace(branch)
-		// FIXME(aluzzardi): This logic is broken
-		if !strings.Contains(branch, "/") {
+
+		// FIXME(aluzzardi): This is a hack to make sure the branch is actually an environment.
+		// There must be a better way to do this.
+		worktree, err := worktreePath(branch)
+		if err != nil {
+			return nil, err
+		}
+		state, err := r.loadState(ctx, worktree)
+		if err != nil || state == nil {
 			continue
 		}
 
-		envs = append(envs, branch)
+		env, err := r.Get(ctx, branch)
+		if err != nil {
+			return nil, err
+		}
+
+		envs = append(envs, env)
 	}
 
 	return envs, nil

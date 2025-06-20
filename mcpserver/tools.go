@@ -4,10 +4,8 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/dagger/container-use/environment"
 	"github.com/dagger/container-use/repository"
@@ -15,42 +13,6 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
-
-func validateName(name string) error {
-	if name == "" {
-		return errors.New("name cannot be empty")
-	}
-
-	if strings.Contains(name, " ") {
-		return errors.New("name cannot contain spaces, use hyphens (-) instead")
-	}
-
-	if strings.Contains(name, "_") {
-		return errors.New("name cannot contain underscores, use hyphens (-) instead")
-	}
-
-	invalidChars := []string{"~", "^", ":", "?", "*", "[", "\\", "/", "\"", "<", ">", "|", "@", "{", "}", "..", "\t", "\n", "\r"}
-	for _, char := range invalidChars {
-		if strings.Contains(name, char) {
-			return fmt.Errorf("name cannot contain '%s'", char)
-		}
-	}
-
-	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") ||
-		strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
-		return errors.New("name cannot start or end with hyphen or dot")
-	}
-
-	if strings.HasSuffix(name, ".lock") {
-		return errors.New("name cannot end with '.lock'")
-	}
-
-	if len(name) > 100 {
-		return errors.New("name cannot exceed 244 bytes")
-	}
-
-	return nil
-}
 
 func openRepository(ctx context.Context, request mcp.CallToolRequest) (*repository.Repository, error) {
 	source, err := request.RequireString("environment_source")
@@ -142,6 +104,7 @@ func init() {
 
 type EnvironmentResponse struct {
 	ID               string                 `json:"id"`
+	Description      string                 `json:"short_description"`
 	BaseImage        string                 `json:"base_image"`
 	SetupCommands    []string               `json:"setup_commands"`
 	Instructions     string                 `json:"instructions"`
@@ -156,6 +119,7 @@ type EnvironmentResponse struct {
 func marshalEnvironment(env *environment.Environment) (string, error) {
 	resp := &EnvironmentResponse{
 		ID:               env.ID,
+		Description:      env.State.Description,
 		Instructions:     env.Config.Instructions,
 		BaseImage:        env.Config.BaseImage,
 		SetupCommands:    env.Config.SetupCommands,
@@ -215,12 +179,12 @@ DO NOT manually install toolchains inside the environment, instead explicitly ca
 		mcp.WithString("explanation",
 			mcp.Description("One sentence explanation for why this environment is being created."),
 		),
-		mcp.WithString("environment_source",
-			mcp.Description("Absolute path to the source git repository for the environment."),
+		mcp.WithString("description",
+			mcp.Description("Short description of the work that is happening in this environment. Keep this description updated using `environment_update`."),
 			mcp.Required(),
 		),
-		mcp.WithString("name",
-			mcp.Description("Name of the environment. Use hyphens (-) to separate words, no spaces or underscores allowed (e.g., 'my-web-app' not 'my web app' or 'my_web_app')"),
+		mcp.WithString("environment_source",
+			mcp.Description("Absolute path to the source git repository for the environment."),
 			mcp.Required(),
 		),
 	),
@@ -229,15 +193,12 @@ DO NOT manually install toolchains inside the environment, instead explicitly ca
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("unable to open the repository", err), nil
 		}
-		name, err := request.RequireString("name")
+		description, err := request.RequireString("description")
 		if err != nil {
 			return nil, err
 		}
-		if err := validateName(name); err != nil {
-			return mcp.NewToolResultErrorFromErr("invalid name", err), nil
-		}
 
-		env, err := repo.Create(ctx, name, request.GetString("explanation", ""))
+		env, err := repo.Create(ctx, description, request.GetString("explanation", ""))
 		if err != nil {
 			return mcp.NewToolResultErrorFromErr("failed to create environment", err), nil
 		}
@@ -266,7 +227,9 @@ var EnvironmentUpdateTool = &Tool{
 			mcp.Description("The instructions for the environment. This should contain any information that might be useful to operate in the environment, such as what tools are available, what commands to use to build/test/etc"),
 			mcp.Required(),
 		),
-
+		mcp.WithString("description",
+			mcp.Description("Short description of the work that is happening in this environment.."),
+		),
 		mcp.WithString("base_image",
 			mcp.Description("Change the base image for the environment."),
 			mcp.Required(),
@@ -332,6 +295,10 @@ Supported schemas are:
 			return nil, err
 		}
 		config.Secrets = secrets
+
+		if description := request.GetString("description", ""); description != "" {
+			env.State.Description = description
+		}
 
 		if err := env.UpdateConfig(ctx, request.GetString("explanation", ""), config); err != nil {
 			return mcp.NewToolResultErrorFromErr("unable to update the environment", err), nil
