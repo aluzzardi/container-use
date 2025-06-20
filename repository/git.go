@@ -149,15 +149,6 @@ func (r *Repository) initializeWorktree(ctx context.Context, id string) (string,
 		return "", err
 	}
 
-	// set up remote tracking branch if it's not already there
-	_, err = runGitCommand(ctx, r.userRepoPath, "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/heads/%s", id))
-	if err != nil {
-		_, err = runGitCommand(ctx, r.userRepoPath, "branch", "--track", id, fmt.Sprintf("%s/%s", containerUseRemote, id))
-		if err != nil {
-			return "", err
-		}
-	}
-
 	return worktreePath, nil
 }
 
@@ -219,7 +210,7 @@ func (r *Repository) propagateGitNotes(ctx context.Context, ref string) error {
 }
 
 func (r *Repository) saveState(ctx context.Context, env *environment.Environment) error {
-	state, err := env.State(ctx)
+	state, err := env.State.Marshal()
 	if err != nil {
 		return err
 	}

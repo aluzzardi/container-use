@@ -9,7 +9,26 @@ import (
 )
 
 type State struct {
-	Container string `json:"container"`
+	Container   string    `json:"container,omitempty"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"created_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+}
+
+func (s *State) Marshal() ([]byte, error) {
+	return json.MarshalIndent(s, "", "  ")
+}
+
+func (s *State) Unmarshal(data []byte) error {
+	if err := json.Unmarshal(data, &s); err != nil {
+		// Try to migrate the legacy state
+		legacySt, err := migrateLegacyState(data)
+		if err != nil {
+			return fmt.Errorf("failed to load state: %w", err)
+		}
+		*s = *legacySt
+	}
+	return nil
 }
 
 func migrateLegacyState(state []byte) (*State, error) {
@@ -24,6 +43,8 @@ func migrateLegacyState(state []byte) (*State, error) {
 
 	return &State{
 		Container: latest.State,
+		CreatedAt: latest.CreatedAt,
+		UpdatedAt: latest.CreatedAt,
 	}, nil
 }
 
