@@ -31,8 +31,8 @@ type Environment struct {
 	Services []*Service
 	Notes    Notes
 
-	mu        sync.Mutex
-	container *dagger.Container
+	mu sync.Mutex
+	c  *dagger.Container
 }
 
 func New(ctx context.Context, id, name, worktree string) (*Environment, error) {
@@ -64,7 +64,7 @@ func New(ctx context.Context, id, name, worktree string) (*Environment, error) {
 }
 
 func (env *Environment) Export(ctx context.Context) (rerr error) {
-	_, err := env.container.Directory(env.Config.Workdir).Export(
+	_, err := env.container().Directory(env.Config.Workdir).Export(
 		ctx,
 		env.Worktree,
 		dagger.DirectoryExportOpts{Wipe: true},
@@ -82,7 +82,7 @@ func (env *Environment) Export(ctx context.Context) (rerr error) {
 }
 
 func (env *Environment) State(ctx context.Context) ([]byte, error) {
-	containerID, err := env.container.ID(ctx)
+	containerID, err := env.container().ID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +119,7 @@ func Load(ctx context.Context, id, name string, state []byte, worktree string) (
 		}
 	}
 
-	env.container = dag.LoadContainerFromID(dagger.ContainerID(st.Container))
+	env.updateContainer(dag.LoadContainerFromID(dagger.ContainerID(st.Container)))
 
 	return env, nil
 }
@@ -129,11 +129,21 @@ func (env *Environment) apply(ctx context.Context, name, explanation, output str
 		return err
 	}
 
-	env.mu.Lock()
-	defer env.mu.Unlock()
-	env.container = newState
+	env.updateContainer(newState)
 
 	return nil
+}
+
+func (env *Environment) container() *dagger.Container {
+	env.mu.Lock()
+	defer env.mu.Unlock()
+	return env.c
+}
+
+func (env *Environment) updateContainer(newState *dagger.Container) {
+	env.mu.Lock()
+	defer env.mu.Unlock()
+	env.c = newState
 }
 
 func containerWithEnvAndSecrets(container *dagger.Container, envs, secrets []string) (*dagger.Container, error) {
@@ -160,16 +170,20 @@ func containerWithEnvAndSecrets(container *dagger.Container, envs, secrets []str
 }
 
 func (env *Environment) buildBase(ctx context.Context) (*dagger.Container, error) {
-	sourceDir := dag.Host().Directory(env.Worktree, dagger.HostDirectoryOpts{
-		NoCache: true,
-	})
+	sourceDir, err := dag.
+		Host().
+		Directory(env.Worktree, dagger.HostDirectoryOpts{NoCache: true}). // bust cache for seperate calls (create vs update)
+		Sync(ctx)                                                         // but when restoring from a save, sourceDir changes should take the oldest state
+	if err != nil {
+		return nil, fmt.Errorf("failed to load environment source: %w", err)
+	}
 
 	container := dag.
 		Container().
 		From(env.Config.BaseImage).
 		WithWorkdir(env.Config.Workdir)
 
-	container, err := containerWithEnvAndSecrets(container, env.Config.Env, env.Config.Secrets)
+	container, err = containerWithEnvAndSecrets(container, env.Config.Env, env.Config.Secrets)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +227,7 @@ func (env *Environment) UpdateConfig(ctx context.Context, explanation string, ne
 
 	env.Config = newConfig
 
-	// Re-build the base image from the worktree
+	// Re-build the base image from the worktree to check for errors.
 	container, err := env.buildBase(ctx)
 	if err != nil {
 		return err
@@ -231,19 +245,25 @@ func (env *Environment) Run(ctx context.Context, explanation, command, shell str
 	if command != "" {
 		args = []string{shell, "-c", command}
 	}
-	newState := env.container.WithExec(args, dagger.ContainerWithExecOpts{
+	newState := env.container().WithExec(args, dagger.ContainerWithExecOpts{
 		UseEntrypoint: useEntrypoint,
 	})
+
 	stdout, err := newState.Stdout(ctx)
 	if err != nil {
 		var exitErr *dagger.ExecError
-		if errors.As(err, &exitErr) {
-			env.Notes.Add("$ %s\nexit %d\nstdout: %s\nstderr: %s\n\n", command, exitErr.ExitCode, exitErr.Stdout, exitErr.Stderr)
-			return fmt.Sprintf("command failed with exit code %d.\nstdout: %s\nstderr: %s", exitErr.ExitCode, exitErr.Stdout, exitErr.Stderr), nil
+		if !errors.As(err, &exitErr) {
+			return "", err
 		}
-		return "", err
+
+		env.Notes.Add("$ %s\nexit %d\nstdout: %s\nstderr: %s\n\n", command, exitErr.ExitCode, exitErr.Stdout, exitErr.Stderr)
+		env.updateContainer(newState)
+
+		return fmt.Sprintf("command failed with exit code %d.\nstdout: %s\nstderr: %s", exitErr.ExitCode, exitErr.Stdout, exitErr.Stderr), nil
 	}
+
 	env.Notes.Add("$ %s\n%s\n\n", command, stdout)
+	env.updateContainer(newState)
 
 	return stdout, nil
 }
@@ -253,7 +273,7 @@ func (env *Environment) RunBackground(ctx context.Context, explanation, command,
 	if command != "" {
 		args = []string{shell, "-c", command}
 	}
-	serviceState := env.container
+	serviceState := env.container()
 
 	// Expose ports
 	for _, port := range ports {
@@ -277,6 +297,7 @@ func (env *Environment) RunBackground(ctx context.Context, explanation, command,
 	}
 
 	env.Notes.Add("$ %s &\n\n", command)
+	// note: we don't save these to env.Services, they will not be restored on Open
 
 	endpoints := EndpointMappings{}
 	for _, port := range ports {
@@ -315,7 +336,7 @@ func (env *Environment) RunBackground(ctx context.Context, explanation, command,
 }
 
 func (env *Environment) Terminal(ctx context.Context) error {
-	container := env.container
+	container := env.container()
 	var cmd []string
 	var sourceRC string
 	if shells, err := container.File("/etc/shells").Contents(ctx); err == nil {
@@ -347,5 +368,5 @@ func (env *Environment) Terminal(ctx context.Context) error {
 }
 
 func (env *Environment) Checkpoint(ctx context.Context, target string) (string, error) {
-	return env.container.Publish(ctx, target)
+	return env.container().Publish(ctx, target)
 }
