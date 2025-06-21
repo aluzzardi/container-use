@@ -284,6 +284,8 @@ env = {}
 cat ./examples/hello_world.md | claude --dangerously-skip-permissions
 ```
 
+_If you see a "Raw mode is not supported" error then run `claude --dangerously-skip-permissions` directly, accept the terms and try the above command again._
+
 ### Run with [Goose](https://block.github.io/goose/)
 
 ```console
