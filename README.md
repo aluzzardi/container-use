@@ -294,6 +294,25 @@ goose run -i ./examples/hello_world.md -s
 
 Prompt as in `parallel.md` but add a sentence 'use container-use mcp'
 
+### Auto Approve
+
+The standard JSON configuration schema allows you to set individual tools to be auto-approved. Since container-use provides safe isolation, you probably want actions to be auto-approved so the agents can do their work!
+
+Here's a sample `autoApprove` block for the standard JSON configuration:
+
+```json
+"autoApprove": [
+  "environment_open",
+  "environment_update",
+  "environment_checkpoint",
+  "environment_run_cmd",
+  "environment_file_read",
+  "environment_file_write",
+  "environment_file_list",
+  "environment_file_delete"
+]
+```
+
 ## Watch your agents work
 
 Your agents will automatically commit to a container-use remote on your local filesystem. You can watch the progress of your agents in real time by running:
